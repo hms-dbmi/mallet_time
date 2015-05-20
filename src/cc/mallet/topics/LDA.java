@@ -190,7 +190,7 @@ public class LDA implements Serializable {
 		// Loop over every word in the corpus
 		for (int di = 0; di < topics.length; di++) {
 			sampleTopicsForOneDoc ((FeatureSequence)ilist.get(di).getData(),
-			                       topics[di], docTopicCounts[di], topicWeights, r);
+			                       topics[di], docTopicCounts[di], null, topicWeights, r);
 		}
 	}
 
@@ -202,7 +202,7 @@ public class LDA implements Serializable {
 		// Loop over every word in the corpus
 		for (int di = start; di < start+length; di++) {
 			sampleTopicsForOneDoc ((FeatureSequence)ilist.get(di).getData(),
-			                       topics[di], docTopicCounts[di], topicWeights, r);
+			                       topics[di], docTopicCounts[di], null, topicWeights, r);
 		}
 	}
 
@@ -244,6 +244,7 @@ public class LDA implements Serializable {
 
   private void sampleTopicsForOneDoc (FeatureSequence oneDocTokens, int[] oneDocTopics, // indexed by seq position
 	                                    int[] oneDocTopicCounts, // indexed by topic index
+                                        int[] oneDocTimes,//indexed by seq position
 	                                    double[] topicWeights, Randoms r)
 	{
 		int[] currentTypeTopicCounts;
@@ -253,19 +254,29 @@ public class LDA implements Serializable {
 		double tw;
 		// Iterate over the positions (words) in the document
 		for (int si = 0; si < docLen; si++) {
+
 			type = oneDocTokens.getIndexAtPosition(si);
+            //Time parameter
+
+            //MTM - Topic Assignmnets Z oneDocTopics
 			oldTopic = oneDocTopics[si];
+
 			// Remove this token from all counts
 			oneDocTopicCounts[oldTopic]--;
 			typeTopicCounts[type][oldTopic]--;
+
+            //Tokens per topic time
 			tokensPerTopic[oldTopic]--;
 			// Build a distribution over topics for this token
 			Arrays.fill (topicWeights, 0.0);
 			topicWeightsSum = 0;
+
+            //Pull out based on type and time
 			currentTypeTopicCounts = typeTopicCounts[type];
+
+            //Calculate topic weight
 			for (int ti = 0; ti < numTopics; ti++) {
-				tw = ((currentTypeTopicCounts[ti] + beta) / (tokensPerTopic[ti] + vBeta))
-				      * ((oneDocTopicCounts[ti] + alpha)); // (/docLen-1+tAlpha); is constant across all topics
+				tw = ((currentTypeTopicCounts[ti] + beta) / (tokensPerTopic[ti] + vBeta)) * ((oneDocTopicCounts[ti] + alpha)); // (/docLen-1+tAlpha); is constant across all topics
 				topicWeightsSum += tw;
 				topicWeights[ti] = tw;
 			}
@@ -275,7 +286,9 @@ public class LDA implements Serializable {
 			// Put that new topic into the counts
 			oneDocTopics[si] = newTopic;
 			oneDocTopicCounts[newTopic]++;
+            //Time
 			typeTopicCounts[type][newTopic]++;
+            //Tokens per topic time
 			tokensPerTopic[newTopic]++;
 		}
 	}

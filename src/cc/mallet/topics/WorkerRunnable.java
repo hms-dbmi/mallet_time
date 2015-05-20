@@ -9,6 +9,8 @@ package cc.mallet.topics;
 
 import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import java.util.zip.*;
 
@@ -17,6 +19,8 @@ import java.text.NumberFormat;
 
 import cc.mallet.types.*;
 import cc.mallet.util.Randoms;
+
+
 
 /**
  * A parallel topic model runnable task.
@@ -50,22 +54,28 @@ public class WorkerRunnable implements Runnable {
 	protected double[] cachedCoefficients;
 
 	protected int[][] typeTopicCounts; // indexed by <feature index, topic index>
+    protected int[][][] typeTopicTimeCounts; //MTM - index by <feature index, topic index, time index>
+
 	protected int[] tokensPerTopic; // indexed by <topic index>
 
 	// for dirichlet estimation
 	protected int[] docLengthCounts; // histogram of document sizes
 	protected int[][] topicDocCounts; // histogram of document/topic counts, indexed by <topic index, sequence position index>
+    protected int[][][] topicTimeDocCounts; // histogram of document-time-topic counts, indexed by <topic index, time index, sequence position index>
 
 	boolean shouldSaveState = false;
 	boolean shouldBuildLocalCounts = true;
-	
+
+    private static int numberOfTimeCluster = 15;
+
 	protected Randoms random;
 	
 	public WorkerRunnable (int numTopics,
 						   double[] alpha, double alphaSum,
 						   double beta, Randoms random,
 						   ArrayList<TopicAssignment> data,
-						   int[][] typeTopicCounts, 
+						   int[][] typeTopicCounts,
+                           int[][][] typeTopicTimeCounts,
 						   int[] tokensPerTopic,
 						   int startDoc, int numDocs) {
 
@@ -86,6 +96,7 @@ public class WorkerRunnable implements Runnable {
 		}
 
 		this.typeTopicCounts = typeTopicCounts;
+        this.typeTopicTimeCounts = typeTopicTimeCounts;
 		this.tokensPerTopic = tokensPerTopic;
 		
 		this.alphaSum = alphaSum;
@@ -119,6 +130,7 @@ public class WorkerRunnable implements Runnable {
 
 	public int[] getDocLengthCounts() { return docLengthCounts; }
 	public int[][] getTopicDocCounts() { return topicDocCounts; }
+    public int[][][] getTopicTimeDocCounts() { return topicTimeDocCounts; }
 
 	public void initializeAlphaStatistics(int size) {
 		docLengthCounts = new int[size];
@@ -160,6 +172,22 @@ public class WorkerRunnable implements Runnable {
 			}
 		}
 
+        //MTM - This is a questionable method of clearing arrays?
+        for (int time = 0; time < numberOfTimeCluster; time++)
+        {
+            for (int type = 0; type < typeTopicTimeCounts[time].length; type++) {
+
+                int[] topicCounts = typeTopicTimeCounts[time][type];
+
+                int position = 0;
+                while (position < topicCounts.length &&
+                        topicCounts[position] > 0) {
+                    topicCounts[position] = 0;
+                    position++;
+                }
+            }
+        }
+
         for (int doc = startDoc;
 			 doc < data.size() && doc < startDoc + numDocs;
              doc++) {
@@ -169,70 +197,91 @@ public class WorkerRunnable implements Runnable {
             FeatureSequence tokens = (FeatureSequence) document.instance.getData();
             FeatureSequence topicSequence =  (FeatureSequence) document.topicSequence;
 
-            int[] topics = topicSequence.getFeatures();
-            for (int position = 0; position < tokens.size(); position++) {
+            int currentDocTimeValue = 0;
+            boolean validFile = false;
 
-				int topic = topics[position];
+            //MTM - This is a hack to get the current time window.
+            String currentDocName = document.instance.getName().toString();
 
-				if (topic == ParallelTopicModel.UNASSIGNED_TOPIC) { continue; }
+            Pattern p = Pattern.compile("[^/]+(?=/[^/]+$)");
+            Matcher m = p.matcher(currentDocName);
 
-				tokensPerTopic[topic]++;
-				
-				// The format for these arrays is 
-				//  the topic in the rightmost bits
-				//  the count in the remaining (left) bits.
-				// Since the count is in the high bits, sorting (desc)
-				//  by the numeric value of the int guarantees that
-				//  higher counts will be before the lower counts.
-				
-				int type = tokens.getIndexAtPosition(position);
+            if (m.find()) {
+                try {
+                    currentDocTimeValue = Integer.parseInt(m.group(0)) - 1;
+                    validFile = true;
+                } catch (NumberFormatException e) {
+                    System.out.println("Skipped non-conforming folder format.");
+                }
+            }
+            if(validFile)
+            {
+                int[] topics = topicSequence.getFeatures();
+                for (int position = 0; position < tokens.size(); position++) {
 
-				int[] currentTypeTopicCounts = typeTopicCounts[ type ];
-				
-				// Start by assuming that the array is either empty
-				//  or is in sorted (descending) order.
-				
-				// Here we are only adding counts, so if we find 
-				//  an existing location with the topic, we only need
-				//  to ensure that it is not larger than its left neighbor.
-				
-				int index = 0;
-				int currentTopic = currentTypeTopicCounts[index] & topicMask;
-				int currentValue;
-				
-				while (currentTypeTopicCounts[index] > 0 && currentTopic != topic) {
-					index++;
-					if (index == currentTypeTopicCounts.length) {
-						System.out.println("overflow on type " + type);
-					}
-					currentTopic = currentTypeTopicCounts[index] & topicMask;
-				}
-				currentValue = currentTypeTopicCounts[index] >> topicBits;
-				
-				if (currentValue == 0) {
-					// new value is 1, so we don't have to worry about sorting
-					//  (except by topic suffix, which doesn't matter)
-					
-					currentTypeTopicCounts[index] =
-						(1 << topicBits) + topic;
-				}
-				else {
-					currentTypeTopicCounts[index] =
-						((currentValue + 1) << topicBits) + topic;
-					
-					// Now ensure that the array is still sorted by 
-					//  bubbling this value up.
-					while (index > 0 &&
-						   currentTypeTopicCounts[index] > currentTypeTopicCounts[index - 1]) {
-						int temp = currentTypeTopicCounts[index];
-						currentTypeTopicCounts[index] = currentTypeTopicCounts[index - 1];
-						currentTypeTopicCounts[index - 1] = temp;
-						
-						index--;
-					}
-				}
-			}
-		}
+                    int topic = topics[position];
+
+                    if (topic == ParallelTopicModel.UNASSIGNED_TOPIC) { continue; }
+
+                    tokensPerTopic[topic]++;
+
+                    // The format for these arrays is
+                    //  the topic in the rightmost bits
+                    //  the count in the remaining (left) bits.
+                    // Since the count is in the high bits, sorting (desc)
+                    //  by the numeric value of the int guarantees that
+                    //  higher counts will be before the lower counts.
+
+                    int type = tokens.getIndexAtPosition(position);
+
+                    //int[] currentTypeTopicCounts = typeTopicCounts[ type ];
+                    int[] currentTypeTopicCounts = typeTopicTimeCounts[currentDocTimeValue][ type ];
+
+                    // Start by assuming that the array is either empty
+                    //  or is in sorted (descending) order.
+
+                    // Here we are only adding counts, so if we find
+                    //  an existing location with the topic, we only need
+                    //  to ensure that it is not larger than its left neighbor.
+
+                    int index = 0;
+                    int currentTopic = currentTypeTopicCounts[index] & topicMask;
+                    int currentValue;
+
+                    while (currentTypeTopicCounts[index] > 0 && currentTopic != topic) {
+                        index++;
+                        if (index == currentTypeTopicCounts.length) {
+                            System.out.println("overflow on type " + type);
+                        }
+                        currentTopic = currentTypeTopicCounts[index] & topicMask;
+                    }
+                    currentValue = currentTypeTopicCounts[index] >> topicBits;
+
+                    if (currentValue == 0) {
+                        // new value is 1, so we don't have to worry about sorting
+                        //  (except by topic suffix, which doesn't matter)
+
+                        currentTypeTopicCounts[index] =
+                            (1 << topicBits) + topic;
+                    }
+                    else {
+                        currentTypeTopicCounts[index] =
+                            ((currentValue + 1) << topicBits) + topic;
+
+                        // Now ensure that the array is still sorted by
+                        //  bubbling this value up.
+                        while (index > 0 &&
+                               currentTypeTopicCounts[index] > currentTypeTopicCounts[index - 1]) {
+                            int temp = currentTypeTopicCounts[index];
+                            currentTypeTopicCounts[index] = currentTypeTopicCounts[index - 1];
+                            currentTypeTopicCounts[index - 1] = temp;
+
+                            index--;
+                        }
+                    }
+                }
+            }
+        }
 
 	}
 
@@ -267,13 +316,27 @@ public class WorkerRunnable implements Runnable {
 				  }
 				*/
 				
-				FeatureSequence tokenSequence =
-					(FeatureSequence) data.get(doc).instance.getData();
-				LabelSequence topicSequence =
-					(LabelSequence) data.get(doc).topicSequence;
-				
-				sampleTopicsForOneDoc (tokenSequence, topicSequence,
-									   true);
+				FeatureSequence tokenSequence = (FeatureSequence) data.get(doc).instance.getData();
+				LabelSequence topicSequence = (LabelSequence) data.get(doc).topicSequence;
+
+                //MTM - This is a hack to get the current time window.
+                String currentDocName = data.get(doc).instance.getName().toString();
+
+                Pattern p = Pattern.compile("[^/]+(?=/[^/]+$)");
+                Matcher m = p.matcher(currentDocName);
+
+                if (m.find()) {
+                    try {
+                        //Remove one because arrays are 0 based, therefore time groups are 0 based (unlike file system)
+                        int currentDocTimeValue = Integer.parseInt(m.group(0)) -1;
+
+                        sampleTopicsForOneDoc (tokenSequence, topicSequence, true, currentDocTimeValue);
+
+                    } catch (NumberFormatException e) {
+                        System.out.println("Skipped non-conforming folder format.");
+                    }
+                }
+
 			}
 			
 			if (shouldBuildLocalCounts) {
@@ -290,26 +353,30 @@ public class WorkerRunnable implements Runnable {
 	
 	protected void sampleTopicsForOneDoc (FeatureSequence tokenSequence,
 										  FeatureSequence topicSequence,
-										  boolean readjustTopicsAndStats /* currently ignored */) {
+										  boolean readjustTopicsAndStats /* currently ignored */,
+                                          int docTime) {
 
+        //MTM - For a given document oneDocTopics[position]=Topic Assignment
 		int[] oneDocTopics = topicSequence.getFeatures();
 
 		int[] currentTypeTopicCounts;
+        int[] currentTypeTopicTimeCounts;
+
 		int type, oldTopic, newTopic;
 		double topicWeightsSum;
 		int docLength = tokenSequence.getLength();
 
+        //MTM - Number of words assigned per topic.
 		int[] localTopicCounts = new int[numTopics];
 		int[] localTopicIndex = new int[numTopics];
 
-		//		populate topic counts
+		//MTM - populate topic counts, Number of words assigned to a topic.
 		for (int position = 0; position < docLength; position++) {
 			if (oneDocTopics[position] == ParallelTopicModel.UNASSIGNED_TOPIC) { continue; }
 			localTopicCounts[oneDocTopics[position]]++;
 		}
 
-		// Build an array that densely lists the topics that
-		//  have non-zero counts.
+		// Build an array that densely lists the topics that have non-zero counts.
 		int denseIndex = 0;
 		for (int topic = 0; topic < numTopics; topic++) {
 			if (localTopicCounts[topic] != 0) {
@@ -324,21 +391,23 @@ public class WorkerRunnable implements Runnable {
 		//		Initialize the topic count/beta sampling bucket
 		double topicBetaMass = 0.0;
 
-		// Initialize cached coefficients and the topic/beta 
-		//  normalizing constant.
-
+		// Initialize cached coefficients and the topic/beta normalizing constant.
 		for (denseIndex = 0; denseIndex < nonZeroTopics; denseIndex++) {
+
+            //MTM - Topic Number.
 			int topic = localTopicIndex[denseIndex];
+
+            //MTM - Number of words assigned to a topic.
 			int n = localTopicCounts[topic];
 
 			//	initialize the normalization constant for the (B * n_{t|d}) term
-			topicBetaMass += beta * n /	(tokensPerTopic[topic] + betaSum);	
+			topicBetaMass += beta * n /	(tokensPerTopic[topic] + betaSum);
 
 			//	update the coefficients for the non-zero topics
 			cachedCoefficients[topic] =	(alpha[topic] + n) / (tokensPerTopic[topic] + betaSum);
 		}
 
-		double topicTermMass = 0.0;
+        double topicTermMass = 0.0;
 
 		double[] topicTermScores = new double[numTopics];
 		int[] topicTermIndices;
@@ -351,7 +420,11 @@ public class WorkerRunnable implements Runnable {
 			type = tokenSequence.getIndexAtPosition(position);
 			oldTopic = oneDocTopics[position];
 
-			currentTypeTopicCounts = typeTopicCounts[type];
+            //MTM - This needs to pull based on time.
+			//currentTypeTopicCounts = typeTopicCounts[type];
+            //currentTypeTopicTimeCounts = typeTopicTimeCounts[docTime][type];
+            currentTypeTopicCounts = typeTopicTimeCounts[docTime][type];
+
 
 			if (oldTopic != ParallelTopicModel.UNASSIGNED_TOPIC) {
 				//	Remove this token from all counts. 
@@ -653,6 +726,8 @@ public class WorkerRunnable implements Runnable {
 				int topic = localTopicIndex[denseIndex];
 				
 				topicDocCounts[topic][ localTopicCounts[topic] ]++;
+
+                topicTimeDocCounts[topic][docTime][localTopicCounts[topic]]++;
 			}
 		}
 
